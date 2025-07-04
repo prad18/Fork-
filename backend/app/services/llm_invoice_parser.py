@@ -10,13 +10,13 @@ class LLMInvoiceParser:
     from OCR text, providing much better accuracy than regex patterns.
     """
     
-    def __init__(self, ollama_url: str = "http://localhost:11434", model: str = "llama3.2"):
+    def __init__(self, ollama_url: str = "http://localhost:11434", model: str = "llama2"):
         """
         Initialize the LLM parser
         
         Args:
             ollama_url: URL of the local Ollama server
-            model: Model name to use (e.g., 'llama3.2', 'mistral', 'phi3')
+            model: Model name to use (e.g., 'llama2', 'llama3.2', 'mistral', 'phi3')
         """
         self.ollama_url = ollama_url
         self.model = model

@@ -61,33 +61,41 @@ echo 🔄 Checking for recommended models...
 
 set "model_found=false"
 
-:: Check for llama3.2 first (recommended)
-ollama list | findstr "llama3.2" >nul
+:: Check for llama2 first (requested by user)
+ollama list | findstr "llama2" >nul
 if %errorlevel% equ 0 (
-    echo ✅ Found llama3.2 model
+    echo ✅ Found llama2 model
     set "model_found=true"
-    set "recommended_model=llama3.2"
+    set "recommended_model=llama2"
 ) else (
-    :: Check for llama3.1
-    ollama list | findstr "llama3.1" >nul
+    :: Check for llama3.2
+    ollama list | findstr "llama3.2" >nul
     if %errorlevel% equ 0 (
-        echo ✅ Found llama3.1 model
+        echo ✅ Found llama3.2 model
         set "model_found=true"
-        set "recommended_model=llama3.1"
+        set "recommended_model=llama3.2"
     ) else (
-        :: Check for llama3
-        ollama list | findstr "llama3" >nul
+        :: Check for llama3.1
+        ollama list | findstr "llama3.1" >nul
         if %errorlevel% equ 0 (
-            echo ✅ Found llama3 model
+            echo ✅ Found llama3.1 model
             set "model_found=true"
-            set "recommended_model=llama3"
+            set "recommended_model=llama3.1"
         ) else (
-            :: Check for any phi model
-            ollama list | findstr "phi" >nul
+            :: Check for llama3
+            ollama list | findstr "llama3" >nul
             if %errorlevel% equ 0 (
-                echo ✅ Found phi model
+                echo ✅ Found llama3 model
                 set "model_found=true"
-                set "recommended_model=phi"
+                set "recommended_model=llama3"
+            ) else (
+                :: Check for any phi model
+                ollama list | findstr "phi" >nul
+                if %errorlevel% equ 0 (
+                    echo ✅ Found phi model
+                    set "model_found=true"
+                    set "recommended_model=phi"
+                )
             )
         )
     )
@@ -97,29 +105,31 @@ if "%model_found%"=="false" (
     echo ⚠️ No recommended models found
     echo.
     echo Recommended models for invoice parsing:
+    echo - llama2:latest ^(user requested, ~3.8GB^)
     echo - llama3.2:latest ^(best overall, ~2GB^)
     echo - llama3.1:latest ^(good performance, ~4.7GB^)
     echo - phi3:latest ^(lightweight, ~2.3GB^)
     echo.
     
-    set /p install_model="Would you like to install llama3.2? (y/n): "
+    set /p install_model="Would you like to install llama2 (user requested)? (y/n): "
     if /i "%install_model%"=="y" (
         echo.
-        echo 📥 Installing llama3.2... This may take a few minutes.
+        echo 📥 Installing llama2... This may take a few minutes.
         echo.
-        ollama pull llama3.2:latest
+        ollama pull llama2:latest
         if %errorlevel% equ 0 (
-            echo ✅ llama3.2 installed successfully
-            set "recommended_model=llama3.2"
+            echo ✅ llama2 installed successfully
+            set "recommended_model=llama2"
         ) else (
-            echo ❌ Failed to install llama3.2
-            echo Please install manually: ollama pull llama3.2
+            echo ❌ Failed to install llama2
+            echo Please install manually: ollama pull llama2
             pause
             exit /b 1
         )
     ) else (
         echo.
         echo Please install a model manually:
+        echo   ollama pull llama2:latest
         echo   ollama pull llama3.2:latest
         echo   ollama pull llama3.1:latest
         echo   ollama pull phi3:latest
