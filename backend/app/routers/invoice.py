@@ -77,7 +77,7 @@ async def upload_invoice(
     try:
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
-        logger.info(f"✅ File saved successfully")
+        logger.info(f"[SUCCESS] File saved successfully")
     except Exception as e:
         logger.error(f"[ERROR] Failed to save file: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to save file: {str(e)}")
@@ -95,7 +95,7 @@ async def upload_invoice(
     db.commit()
     db.refresh(invoice)
     
-    logger.info(f"✅ Invoice record created with ID: {invoice.id}")
+    logger.info(f"[SUCCESS] Invoice record created with ID: {invoice.id}")
     
     # Process invoice in background
     background_tasks.add_task(process_invoice_background, invoice.id, file_path)
@@ -141,7 +141,7 @@ async def process_invoice_background(invoice_id: int, file_path: str):
                 db.commit()
                 return
             
-            logger.info(f"✅ Processing successful for invoice {invoice_id}")
+            logger.info(f"[SUCCESS] Processing successful for invoice {invoice_id}")
             
             # Extract data from result
             parsed_data = result.get('parsed_data', {})
@@ -164,10 +164,10 @@ async def process_invoice_background(invoice_id: int, file_path: str):
                 try:
                     # Try ISO format first
                     invoice.invoice_date = datetime.fromisoformat(parsed_data['invoice_date'])
-                    logger.info(f"✅ Invoice date parsed: {invoice.invoice_date}")
-                except Exception as e:
-                    logger.warning(f"⚠️ Could not parse invoice date: {parsed_data.get('invoice_date')}")
+                    logger.info(f"[SUCCESS] Invoice date parsed: {invoice.invoice_date}")
+                except ValueError:
                     # Try alternative date formats
+                    date_str = parsed_data.get('invoice_date', '')
                     date_formats = [
                         "%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y", 
                         "%B %d, %Y", "%b %d, %Y",
@@ -175,16 +175,27 @@ async def process_invoice_background(invoice_id: int, file_path: str):
                         "%m-%d-%Y", "%d-%m-%Y"
                     ]
                     
+                    parsed_date = None
                     for fmt in date_formats:
                         try:
-                            invoice.invoice_date = datetime.strptime(parsed_data['invoice_date'], fmt)
-                            logger.info(f"✅ Invoice date parsed with format {fmt}: {invoice.invoice_date}")
+                            parsed_date = datetime.strptime(date_str, fmt)
                             break
                         except ValueError:
                             continue
+                    
+                    if parsed_date:
+                        invoice.invoice_date = parsed_date
+                        logger.info(f"[SUCCESS] Invoice date parsed with format: {invoice.invoice_date}")
+                    else:
+                        logger.warning(f"[WARNING] Could not parse invoice date: {date_str}")
+                except Exception as e:
+                    logger.warning(f"[WARNING] Date parsing error: {str(e)}")
+            
+            # Store the parsed data
+            invoice.parsed_data = parsed_data
             
             db.commit()
-            logger.info(f"✅ Invoice {invoice_id} processing completed and saved to database")
+            logger.info(f"[SUCCESS] Invoice {invoice_id} processing completed and saved to database")
             
         except Exception as e:
             logger.error(f"[ERROR] Error in background processing: {str(e)}")
