@@ -50,12 +50,18 @@ async def upload_invoice(
     current_user: User = Depends(get_current_user)
 ):
     """Upload and process an invoice file"""
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    logger.info(f"🔍 Starting invoice upload for user {current_user.id}")
+    logger.info(f"🔍 File: {file.filename}, Content-Type: {file.content_type}")
     
     # Validate file type
     allowed_extensions = {'.pdf', '.png', '.jpg', '.jpeg', '.tiff', '.bmp'}
     file_extension = os.path.splitext(file.filename)[1].lower()
     
     if file_extension not in allowed_extensions:
+        logger.error(f"[ERROR] Invalid file type: {file_extension}")
         raise HTTPException(
             status_code=400, 
             detail=f"File type {file_extension} not allowed. Supported types: {', '.join(allowed_extensions)}"
@@ -65,11 +71,15 @@ async def upload_invoice(
     unique_filename = f"{uuid.uuid4()}{file_extension}"
     file_path = os.path.join(settings.UPLOAD_FOLDER, unique_filename)
     
+    logger.info(f"🔍 Saving file to: {file_path}")
+    
     # Save file
     try:
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
+        logger.info(f"✅ File saved successfully")
     except Exception as e:
+        logger.error(f"[ERROR] Failed to save file: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to save file: {str(e)}")
     
     # Create invoice record
@@ -85,15 +95,23 @@ async def upload_invoice(
     db.commit()
     db.refresh(invoice)
     
+    logger.info(f"✅ Invoice record created with ID: {invoice.id}")
+    
     # Process invoice in background
     background_tasks.add_task(process_invoice_background, invoice.id, file_path)
+    logger.info(f"🔍 Background processing task added for invoice {invoice.id}")
     
     return invoice
 
 async def process_invoice_background(invoice_id: int, file_path: str):
     """Background task to process invoice using integrated OCR + LLM pipeline"""
+    import logging
+    logger = logging.getLogger(__name__)
     
     try:
+        logger.info(f"🔍 Starting background processing for invoice {invoice_id}")
+        logger.info(f"🔍 File path: {file_path}")
+        
         # Create new database session for background task
         from app.database import SessionLocal
         db = SessionLocal()
@@ -102,44 +120,53 @@ async def process_invoice_background(invoice_id: int, file_path: str):
             # Get invoice record
             invoice = db.query(Invoice).filter(Invoice.id == invoice_id).first()
             if not invoice:
-                print(f"❌ Invoice {invoice_id} not found in database")
+                logger.error(f"[ERROR] Invoice {invoice_id} not found in database")
                 return
             
-            print(f"🔄 Processing invoice {invoice_id}: {invoice.filename}")
+            logger.info(f"� Processing invoice {invoice_id}: {invoice.filename}")
+            logger.info(f"🔍 Starting OCR + LLM pipeline...")
             
             # Process using integrated service (OCR + LLM)
-            print(f"� Processing with PaddleOCR + LLM pipeline...")
             result = invoice_processor.process_invoice(file_path)
             
-            if not result.get('success', False):
-                raise Exception(f"Processing failed: {result.get('error', 'Unknown error')}")
+            logger.info(f"🔍 Processing result: {result}")
             
-            print(f"✅ Processing complete: {result['item_count']} items found")
-            print(f"   Vendor: {result.get('vendor_name', 'Unknown')}")
-            print(f"   Total: ${result.get('total_amount', 0)}")
-            print(f"   Confidence: {result.get('confidence', 0):.2f}")
+            if not result.get('success', False):
+                error_msg = result.get('error', 'Unknown error')
+                logger.error(f"[ERROR] Processing failed for invoice {invoice_id}: {error_msg}")
+                
+                # Update invoice with failed status
+                invoice.processing_status = "failed"
+                invoice.error_message = error_msg
+                db.commit()
+                return
+            
+            logger.info(f"✅ Processing successful for invoice {invoice_id}")
+            
+            # Extract data from result
+            parsed_data = result.get('parsed_data', {})
+            items = parsed_data.get('items', [])
+            
+            logger.info(f"🔍 Found {len(items)} items in invoice")
+            logger.info(f"🔍 Vendor: {parsed_data.get('vendor_name', 'Unknown')}")
+            logger.info(f"🔍 Total: ${parsed_data.get('total_amount', 0)}")
+            logger.info(f"🔍 Parsing method: {parsed_data.get('parsing_method', 'Unknown')}")
             
             # Update invoice with processed data
-            invoice.ocr_text = result.get('extracted_text', '')
-            invoice.parsed_data = {
-                'items': result.get('items', []),
-                'categorized_items': result.get('categorized_items', {}),
-                'processing_method': result.get('processing_method', 'Unknown'),
-                'confidence': result.get('confidence', 0.0),
-                'processing_time': result.get('processing_time', {}),
-                'item_count': result.get('item_count', 0)
-            }
-            
-            invoice.total_amount = result.get('total_amount')
-            invoice.vendor_name = result.get('vendor_name')
+            invoice.ocr_text = result.get('ocr_result', {}).get('text', '')
+            invoice.parsed_data = parsed_data
+            invoice.total_amount = parsed_data.get('total_amount')
+            invoice.vendor_name = parsed_data.get('vendor_name')
+            invoice.processing_status = "completed"
             
             # Parse invoice date if available
-            if result.get('invoice_date'):
+            if parsed_data.get('invoice_date'):
                 try:
                     # Try ISO format first
-                    invoice.invoice_date = datetime.fromisoformat(result['invoice_date'])
-                    print(f"✅ Invoice date parsed: {invoice.invoice_date}")
-                except Exception:
+                    invoice.invoice_date = datetime.fromisoformat(parsed_data['invoice_date'])
+                    logger.info(f"✅ Invoice date parsed: {invoice.invoice_date}")
+                except Exception as e:
+                    logger.warning(f"⚠️ Could not parse invoice date: {parsed_data.get('invoice_date')}")
                     # Try alternative date formats
                     date_formats = [
                         "%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y", 
@@ -147,41 +174,32 @@ async def process_invoice_background(invoice_id: int, file_path: str):
                         "%d %B %Y", "%d %b %Y",
                         "%m-%d-%Y", "%d-%m-%Y"
                     ]
-                    for date_format in date_formats:
+                    
+                    for fmt in date_formats:
                         try:
-                            invoice.invoice_date = datetime.strptime(
-                                result['invoice_date'], date_format
-                            )
-                            print(f"✅ Invoice date parsed with format {date_format}: {invoice.invoice_date}")
+                            invoice.invoice_date = datetime.strptime(parsed_data['invoice_date'], fmt)
+                            logger.info(f"✅ Invoice date parsed with format {fmt}: {invoice.invoice_date}")
                             break
-                        except:
+                        except ValueError:
                             continue
             
-            invoice.processing_status = "completed"
             db.commit()
-            print(f"✅ Invoice {invoice_id} processing completed successfully")
+            logger.info(f"✅ Invoice {invoice_id} processing completed and saved to database")
             
-        finally:
-            db.close()
-        
-    except Exception as e:
-        print(f"❌ Error processing invoice {invoice_id}: {str(e)}")
-        print(f"   Error type: {type(e).__name__}")
-        import traceback
-        traceback.print_exc()
-        
-        # Log error and mark as failed
-        from app.database import SessionLocal
-        db = SessionLocal()
-        try:
-            invoice = db.query(Invoice).filter(Invoice.id == invoice_id).first()
-            if invoice:
+        except Exception as e:
+            logger.error(f"[ERROR] Error in background processing: {str(e)}")
+            # Update invoice with failed status
+            if 'invoice' in locals():
                 invoice.processing_status = "failed"
-                invoice.parsed_data = {"error": str(e), "error_type": type(e).__name__}
+                invoice.error_message = str(e)
                 db.commit()
-                print(f"❌ Marked invoice {invoice_id} as failed")
         finally:
             db.close()
+            
+    except Exception as e:
+        logger.error(f"[ERROR] Critical error in background processing: {str(e)}")
+        # Fallback logging if database operations fail
+        print(f"[ERROR] Critical error processing invoice {invoice_id}: {str(e)}")
 
 @router.get("/", response_model=List[InvoiceResponse])
 async def get_invoices(

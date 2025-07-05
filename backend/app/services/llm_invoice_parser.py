@@ -10,7 +10,7 @@ class LLMInvoiceParser:
     from OCR text, providing much better accuracy than regex patterns.
     """
     
-    def __init__(self, ollama_url: str = "http://localhost:11434", model: str = "llama2"):
+    def __init__(self, ollama_url: str = "http://127.0.0.1:11434", model: str = "llama2"):
         """
         Initialize the LLM parser
         
@@ -24,74 +24,60 @@ class LLMInvoiceParser:
         
     def parse_invoice(self, ocr_text: str) -> Dict[str, Any]:
         """
-        Parse invoice using LLM for robust extraction
-        
-        Args:
-            ocr_text: Raw OCR text from the invoice
-            
-        Returns:
-            Dictionary with structured invoice data
+        Hybrid parsing: run regex/heuristic first, then LLM, fallback to regex if LLM fails.
         """
-        if not ocr_text or len(ocr_text.strip()) < 10:
-            return self._empty_result()
+        import logging
+        logger = logging.getLogger(__name__)
         
+        logger.info(f"[INFO] Starting invoice parsing with OCR text length: {len(ocr_text) if ocr_text else 0}")
+        
+        if not ocr_text or len(ocr_text.strip()) < 10:
+            logger.warning("[WARNING] OCR text is empty or too short")
+            return self._empty_result()
+
+        # Debug: Log the actual OCR text (first 500 characters)
+        logger.info(f"[INFO] OCR Text Preview (first 500 chars): {ocr_text[:500]}")
+        
+        # Step 1: Heuristic/regex parse (basic fields)
+        logger.info("[INFO] Step 1: Running regex/heuristic parsing")
+        regex_result = self._fallback_parse(ocr_text)
+        logger.info(f"[INFO] Regex result: {json.dumps(regex_result, indent=2)}")
+
+        # Step 2: Try LLM, passing regex_result as context
         try:
-            # Check if Ollama is available
             if not self._check_ollama_available():
-                print("⚠️ Ollama not available, falling back to basic extraction")
-                return self._fallback_parse(ocr_text)
+                logger.warning("[WARNING] Ollama not available, using regex/heuristic result.")
+                regex_result['parsing_method'] = 'regex-only'
+                return regex_result
+
+            logger.info("[INFO] Step 2: Running LLM parsing")
+            # Optionally, add regex_result as context to the prompt
+            prompt = self._create_parsing_prompt(ocr_text, regex_result)
+            logger.info(f"[INFO] LLM Prompt (first 1000 chars): {prompt[:1000]}")
             
-            # Use LLM to parse the invoice
-            parsed_data = self._llm_parse(ocr_text)
-            
+            parsed_data = self._llm_parse_with_prompt(ocr_text, prompt)
             if parsed_data:
+                logger.info(f"[SUCCESS] LLM parsing successful: {json.dumps(parsed_data, indent=2)}")
+                parsed_data['parsing_method'] = 'llm+regex'
+                parsed_data['regex_result'] = regex_result
                 return parsed_data
             else:
-                print("⚠️ LLM parsing failed, falling back to basic extraction")
-                return self._fallback_parse(ocr_text)
-                
+                logger.warning("[WARNING] LLM parsing failed, using regex/heuristic result.")
+                regex_result['parsing_method'] = 'regex-fallback'
+                return regex_result
         except Exception as e:
-            print(f"❌ Error in LLM parsing: {e}")
-            return self._fallback_parse(ocr_text)
-    
-    def _check_ollama_available(self) -> bool:
-        """Check if Ollama server is running and model is available"""
-        try:
-            # Check if server is running
-            response = requests.get(f"{self.ollama_url}/api/tags", timeout=5)
-            if response.status_code != 200:
-                return False
-            
-            # Check if our model is available
-            models = response.json().get('models', [])
-            model_names = [model['name'] for model in models]
-            
-            # Check for exact match or partial match
-            model_available = any(self.model in name for name in model_names)
-            
-            if not model_available:
-                print(f"⚠️ Model '{self.model}' not found. Available models: {model_names}")
-                # Try to use the first available model
-                if model_names:
-                    self.model = model_names[0].split(':')[0]  # Remove tag if present
-                    print(f"🔄 Using available model: {self.model}")
-                    return True
-                return False
-            
-            return True
-            
-        except Exception as e:
-            print(f"❌ Error checking Ollama: {e}")
-            return False
-    
-    def _llm_parse(self, ocr_text: str) -> Optional[Dict[str, Any]]:
-        """Use LLM to parse the invoice text"""
-        
-        # Create a detailed prompt for the LLM
-        prompt = self._create_parsing_prompt(ocr_text)
+            logger.error(f"[ERROR] Error in LLM parsing: {e}")
+            regex_result['parsing_method'] = 'regex-except'
+            regex_result['llm_error'] = str(e)
+            return regex_result
+
+    def _llm_parse_with_prompt(self, ocr_text: str, prompt: str) -> Optional[Dict[str, Any]]:
+        """Use LLM to parse the invoice text with a custom prompt"""
+        import logging
+        logger = logging.getLogger(__name__)
         
         try:
-            # Make request to Ollama
+            logger.info(f"[INFO] Making LLM request to {self.api_url} with model {self.model}")
             response = requests.post(
                 self.api_url,
                 json={
@@ -99,44 +85,51 @@ class LLMInvoiceParser:
                     "prompt": prompt,
                     "stream": False,
                     "options": {
-                        "temperature": 0.1,  # Low temperature for consistent output
+                        "temperature": 0.1,
                         "top_p": 0.9,
                         "top_k": 40
                     }
                 },
-                timeout=60  # Give LLM time to process
+                timeout=600
             )
             
-            if response.status_code != 200:
-                print(f"❌ Ollama API error: {response.status_code}")
-                return None
+            logger.info(f"[INFO] LLM response status: {response.status_code}")
             
-            # Parse the response
+            if response.status_code != 200:
+                logger.error(f"[ERROR] Ollama API error: {response.status_code}, Response: {response.text}")
+                return None
+                
             result = response.json()
             llm_output = result.get('response', '').strip()
             
             if not llm_output:
-                print("❌ Empty response from LLM")
+                logger.error("[ERROR] Empty response from LLM")
                 return None
             
-            # Extract JSON from LLM response
-            parsed_data = self._extract_json_from_response(llm_output)
+            logger.info(f"[INFO] LLM raw output (first 1000 chars): {llm_output[:1000]}")
             
+            parsed_data = self._extract_json_from_response(llm_output)
             if parsed_data:
-                # Validate and clean the parsed data
-                return self._validate_and_clean_data(parsed_data)
+                logger.info(f"[SUCCESS] Successfully extracted JSON from LLM response")
+                validated_data = self._validate_and_clean_data(parsed_data)
+                logger.info(f"[SUCCESS] Validated data: {json.dumps(validated_data, indent=2)}")
+                return validated_data
             else:
-                print("❌ Could not extract valid JSON from LLM response")
+                logger.error("[ERROR] Could not extract valid JSON from LLM response")
+                logger.error(f"[ERROR] LLM output was: {llm_output}")
                 return None
                 
         except Exception as e:
-            print(f"❌ Error in LLM request: {e}")
+            logger.error(f"[ERROR] Error in LLM request: {e}")
             return None
-    
-    def _create_parsing_prompt(self, ocr_text: str) -> str:
-        """Create a detailed prompt for the LLM to parse invoice data"""
-        
-        prompt = f"""You are an expert invoice parser. Parse the following OCR text from a restaurant/food service invoice and extract structured data.
+
+    def _create_parsing_prompt(self, ocr_text: str, regex_result: Optional[Dict[str, Any]] = None) -> str:
+        """Create a detailed prompt for the LLM to parse invoice data, with optional regex context"""
+        context = ""
+        if regex_result:
+            context = f"\n\nPRE-EXTRACTED FIELDS (from regex):\n{json.dumps(regex_result, indent=2)}\n"
+        prompt = f"""
+You are an expert invoice parser. Parse the following OCR text from a restaurant/food service invoice and extract structured data.{context}
 
 OCR TEXT:
 {ocr_text}
@@ -171,38 +164,128 @@ RULES:
 7. If unsure about a value, use reasonable defaults
 8. For dates, try to parse into YYYY-MM-DD format
 
-RESPOND WITH ONLY VALID JSON:"""
-
+RESPOND WITH ONLY VALID JSON:
+"""
         return prompt
     
-    def _extract_json_from_response(self, llm_output: str) -> Optional[Dict[str, Any]]:
-        """Extract JSON from LLM response, handling various formats"""
-        
-        # Try to find JSON in the response
-        json_patterns = [
-            r'\{.*\}',  # Look for { ... }
-            r'```json\s*(\{.*\})\s*```',  # Look for ```json { ... } ```
-            r'```\s*(\{.*\})\s*```',  # Look for ``` { ... } ```
-        ]
-        
-        for pattern in json_patterns:
-            matches = re.findall(pattern, llm_output, re.DOTALL)
-            for match in matches:
-                try:
-                    # Clean the JSON string
-                    json_str = match.strip()
-                    parsed = json.loads(json_str)
-                    return parsed
-                except json.JSONDecodeError:
-                    continue
-        
-        # If no JSON found, try parsing the entire response
+    def _check_ollama_available(self) -> bool:
+        """Check if Ollama server is running and model is available"""
         try:
-            return json.loads(llm_output.strip())
-        except json.JSONDecodeError:
-            print("❌ Could not parse JSON from LLM response")
-            print(f"LLM Output: {llm_output[:500]}...")
+            # Check if server is running
+            response = requests.get(f"{self.ollama_url}/api/tags", timeout=5)
+            if response.status_code != 200:
+                return False
+            
+            # Check if our model is available
+            models = response.json().get('models', [])
+            model_names = [model['name'] for model in models]
+            
+            # Check for exact match or partial match
+            model_available = any(self.model in name for name in model_names)
+            
+            if not model_available:
+                import logging
+                logging.getLogger(__name__).warning(f"[WARNING] Model '{self.model}' not found. Available models: {model_names}")
+                # Try to use the first available model
+                if model_names:
+                    self.model = model_names[0].split(':')[0]  # Remove tag if present
+                    import logging
+                    logging.getLogger(__name__).info(f"🔄 Using available model: {self.model}")
+                    return True
+                return False
+            
+            return True
+            
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).error(f"[ERROR] Error checking Ollama: {e}")
+            return False
+    
+    def _llm_parse(self, ocr_text: str) -> Optional[Dict[str, Any]]:
+        """Use LLM to parse the invoice text"""
+        
+        # Create a detailed prompt for the LLM
+        prompt = self._create_parsing_prompt(ocr_text)
+        
+        try:
+            # Make request to Ollama
+            response = requests.post(
+                self.api_url,
+                json={
+                    "model": self.model,
+                    "prompt": prompt,
+                    "stream": False,
+                    "options": {
+                        "temperature": 0.1,  # Low temperature for consistent output
+                        "top_p": 0.9,
+                        "top_k": 40
+                    }
+                },
+                timeout=600  # Give LLM time to process
+            )
+            
+            if response.status_code != 200:
+                import logging
+                logging.getLogger(__name__).error(f"[ERROR] Ollama API error: {response.status_code}")
+                return None
+            
+            # Parse the response
+            result = response.json()
+            llm_output = result.get('response', '').strip()
+            
+            if not llm_output:
+                import logging
+                logging.getLogger(__name__).error("[ERROR] Empty response from LLM")
+                return None
+            
+            # Extract JSON from LLM response
+            parsed_data = self._extract_json_from_response(llm_output)
+            
+            if parsed_data:
+                # Validate and clean the parsed data
+                return self._validate_and_clean_data(parsed_data)
+            else:
+                import logging
+                logging.getLogger(__name__).error("[ERROR] Could not extract valid JSON from LLM response")
+                return None
+                
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).error(f"[ERROR] Error in LLM request: {e}")
             return None
+    
+
+    
+    
+
+    def _extract_json_from_response(self, llm_output: str) -> Optional[Dict[str, Any]]:
+        """Extract JSON from LLM response, handling noise and formatting errors"""
+        
+        # Remove leading/trailing whitespace or Markdown
+        cleaned_output = llm_output.strip()
+        
+        # Try direct JSON parse first
+        try:
+            return json.loads(cleaned_output)
+        except json.JSONDecodeError:
+            pass
+        
+        # Try to extract a JSON block using a safer regex
+        json_block_pattern = r'(\{(?:[^{}]|(?R))*\})'  # Recursive-safe pattern
+        matches = re.findall(json_block_pattern, cleaned_output, re.DOTALL)
+        
+        for match in matches:
+            try:
+                return json.loads(match.strip())
+            except json.JSONDecodeError:
+                continue
+        
+        # If nothing worked
+        import logging
+        logging.getLogger(__name__).error("[ERROR] Could not extract valid JSON from LLM response")
+        logging.getLogger(__name__).error(f"LLM Output: {llm_output[:500]}...")
+        return None
+
     
     def _validate_and_clean_data(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """Validate and clean the parsed data from LLM"""
@@ -302,6 +385,7 @@ RESPOND WITH ONLY VALID JSON:"""
                 break
         
         return {
+            "success": True,
             "vendor_name": vendor_name,
             "total_amount": total_amount,
             "invoice_date": invoice_date,
@@ -314,6 +398,7 @@ RESPOND WITH ONLY VALID JSON:"""
     def _empty_result(self) -> Dict[str, Any]:
         """Return empty result structure"""
         return {
+            "success": True,
             "vendor_name": None,
             "total_amount": None,
             "invoice_date": None,
@@ -359,4 +444,5 @@ if __name__ == "__main__":
     
     parser = LLMInvoiceParser()
     result = parser.parse_invoice(sample_text)
-    print(json.dumps(result, indent=2))
+    import logging
+    logging.getLogger(__name__).info(json.dumps(result, indent=2))

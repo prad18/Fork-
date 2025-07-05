@@ -4,7 +4,7 @@ Combines PaddleOCR for text extraction with LLM for robust parsing
 """
 
 import logging
-from typing import Dict, Any
+from typing import Dict, Any, List
 from .ocr_service import OCRService
 from .llm_invoice_parser import LLMInvoiceParser
 
@@ -32,29 +32,75 @@ class InvoiceProcessingService:
             Dict containing parsed invoice data
         """
         try:
-            logger.info(f"Processing invoice: {file_path}")
+            logger.info(f"[INFO] Processing invoice: {file_path}")
             
             # Step 1: Extract text using OCR
-            logger.info("Step 1: Extracting text with PaddleOCR...")
+            logger.info("[INFO] Step 1: Extracting text with PaddleOCR...")
             extracted_text = self.ocr_service.extract_text(file_path)
             
+            # Debug: Log the extracted text
+            logger.info(f"[INFO] OCR extracted {len(extracted_text) if extracted_text else 0} characters")
+            if extracted_text:
+                logger.info(f"[INFO] OCR Text Preview (first 500 chars): {extracted_text[:500]}")
+            else:
+                logger.warning("[WARNING] OCR returned empty text")
+            
             if not extracted_text or not extracted_text.strip():
+                logger.error("[ERROR] No text extracted from image")
                 return {
                     'success': False,
                     'error': 'No text extracted from image',
                     'ocr_result': {'text': extracted_text, 'success': False}
                 }
             
-            logger.info(f"OCR extracted {len(extracted_text)} characters")
-            
             # Step 2: Parse with LLM
+            logger.info("[INFO] Step 2: Parsing with LLM...")
+            parsed_data = self.llm_parser.parse_invoice(extracted_text)
+            
+            if not parsed_data:
+                logger.error("[ERROR] LLM parsing returned empty result")
+                return {
+                    'success': False,
+                    'error': 'Failed to parse invoice data',
+                    'ocr_result': {'text': extracted_text, 'success': True}
+                }
+            
+            logger.info(f"[SUCCESS] Successfully parsed invoice with method: {parsed_data.get('parsing_method', 'unknown')}")
+            
+            # Step 3: Process items for carbon footprint
+            logger.info("[STEP 3] Processing items for carbon footprint...")
+            processed_items = self._process_items_for_carbon_footprint(parsed_data.get('items', []))
+            
+            # Combine results
+            result = {
+                'success': True,
+                'ocr_result': {
+                    'text': extracted_text,
+                    'success': True
+                },
+                'parsed_data': parsed_data,
+                'processed_items': processed_items,
+                'parsing_method': parsed_data.get('parsing_method', 'unknown')
+            }
+            
+            logger.info("[SUCCESS] Invoice processing completed successfully")
+            return result
+            
+        except Exception as e:
+            logger.error(f"[ERROR] Error processing invoice: {str(e)}")
+            return {
+                'success': False,
+                'error': str(e),
+                'ocr_result': {'text': '', 'success': False}
+            }
             logger.info("Step 2: Parsing with LLM...")
             parsed_result = self.llm_parser.parse_invoice(extracted_text)
-            
+            # Debug: print parsed_result for diagnosis
+            logger.debug(f"LLM/Parser result: {parsed_result}")
             if not parsed_result.get('success', False):
                 return {
                     'success': False,
-                    'error': 'LLM parsing failed',
+                    'error': 'Invoice parsing failed',
                     'ocr_result': {'text': extracted_text, 'success': True, 'confidence': 0.8},
                     'llm_result': parsed_result
                 }
@@ -102,11 +148,12 @@ class InvoiceProcessingService:
             logger.info("Processing invoice from text with LLM...")
             
             parsed_result = self.llm_parser.parse_invoice(text)
-            
+            # Debug: print parsed_result for diagnosis
+            logger.debug(f"LLM/Parser result: {parsed_result}")
             if not parsed_result.get('success', False):
                 return {
                     'success': False,
-                    'error': 'LLM parsing failed',
+                    'error': 'Invoice parsing failed',
                     'llm_result': parsed_result
                 }
             
@@ -176,8 +223,25 @@ class InvoiceProcessingService:
                 'llm_service': {'available': False, 'error': str(e)},
                 'combined_service': {'available': False, 'error': str(e)}
             }
+    
+    def _process_items_for_carbon_footprint(self, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Process parsed invoice items for carbon footprint calculation"""
+        processed_items = []
+        
+        for item in items:
+            processed_item = {
+                'name': item.get('name', ''),
+                'quantity': item.get('quantity', 1),
+                'unit': item.get('unit', 'item'),
+                'price': item.get('price', 0.0),
+                'category': item.get('category', 'unknown'),
+                'carbon_footprint': 0.0  # Will be calculated by carbon service
+            }
+            processed_items.append(processed_item)
+        
+        return processed_items
 
-# Example usage and testing
+# Test code for standalone execution
 if __name__ == "__main__":
     # Test the complete service
     
@@ -229,7 +293,7 @@ if __name__ == "__main__":
     result = processor.process_invoice_from_text(sample_ocr_text)
     
     if result['success']:
-        print(f"✅ Processing successful!")
+        print(f"[SUCCESS] Processing successful!")
         print(f"Vendor: {result['vendor_name']}")
         print(f"Total: ${result['total_amount']}")
         print(f"Date: {result['invoice_date']}")
@@ -244,7 +308,7 @@ if __name__ == "__main__":
             print(f"  ... and {result['item_count'] - 3} more items")
             
     else:
-        print(f"❌ Processing failed: {result['error']}")
+        print(f"[ERROR] Processing failed: {result['error']}")
     
     # If you want to test with an actual image file:
     # result = processor.process_invoice("path/to/your/invoice.jpg")
